@@ -264,6 +264,8 @@ int main(int argc, char* argv[])
   bool isSingleElePD( !isMC && inURL.Contains("SkimElectrons"));
   bool isMuSkimedMCPD( isMC && inURL.Contains("HINPbPbAutumn18DR_skims") && inURL.Contains("Muons"));
   bool isEleSkimedMCPD( isMC && inURL.Contains("HINPbPbAutumn18DR_skims") && inURL.Contains("Electrons"));
+  bool isDYMC( isMC && (inURL.Contains("DYJetsToLL") || inURL.Contains("gg2")) );
+
   LumiRun lumiTool;
   ElectronEfficiencyWrapper eleEff("${CMSSW_BASE}/src/HeavyIonsAnalysis/topskim/data", false);
 
@@ -547,6 +549,16 @@ int main(int argc, char* argv[])
   outTree->Branch("event" , &t_event, "event/L");
   outTree->Branch("isData", &t_isData, "isData/I");
 
+  Int_t t_decayId(0),t_tauDecayId(0),t_matchedDecays(0);
+  outTree->Branch("decayId",       &t_decayId,       "decayId/I");
+  outTree->Branch("tauDecayId",    &t_tauDecayId,    "tauDecayId/I");
+  outTree->Branch("matchedDecays", &t_matchedDecays, "matchedDecays/I");
+  Float_t t_genllpt(0),t_genlleta(0),t_genllphi(0),t_genllm(0);
+  outTree->Branch("genllpt",       &t_genllpt,      "genllpt/F");
+  outTree->Branch("genlleta",      &t_genlleta,     "genlleta/F");
+  outTree->Branch("genllphi",      &t_genllphi,     "genllphi/F");
+  outTree->Branch("genllm",        &t_genllm,       "genllm/F");
+
   outTree->Branch("vx", &t_vx, "vx/F");
   outTree->Branch("vy", &t_vy, "vy/F");
   outTree->Branch("vz", &t_vz, "vz/F");
@@ -747,15 +759,19 @@ int main(int argc, char* argv[])
     //gen level analysis
     float evWgt(1.0),topPtWgt(1.0),topMassUpWgt(1.0),topMassDnWgt(1.0);
     int genDileptonCat(1.);
-    std::vector<TLorentzVector> genLeptons, genZLeptons, genBjets;
+    std::vector<TLorentzVector> genLeptons, genZLeptons, genZTauLeptons, genBjets;
     std::vector<bool> genTauLeptons;
     std::vector<int> genLeptonIds;
     bool isGenDilepton(false),isLeptonFiducial(false),is1bFiducial(false),is2bFiducial(false);    
     if(isMC) {
 
+      std::vector<int> id_firstLeptons;
+      std::vector<TLorentzVector> p4_firstLeptons;
+
       //gen level selection
       int nlFromTopW(0);
       TLorentzVector topP4(0,0,0,0),antitopP4(0,0,0,0);
+      int neFromZ(0),nmFromZ(0),ntFromZ(0);
       for(size_t i=0; i<fForestGen.mcPID->size(); i++) {
         int pid=fForestGen.mcPID->at(i);
         //int sta=fForestGen.mcStatus->at(i);
@@ -765,19 +781,45 @@ int main(int argc, char* argv[])
         TLorentzVector p4(0,0,0,0);
         p4.SetPtEtaPhiM( fForestGen.mcPt->at(i), fForestGen.mcEta->at(i), fForestGen.mcPhi->at(i), fForestGen.mcMass->at(i) );
 
+        bool isFromTop(abs(mom_pid)==6 || abs(gmom_pid)==6 );
+        bool isFromW( abs(mom_pid)==24 || abs(gmom_pid)==24 );
+        bool isTauFeedDown( abs(mom_pid)==15 );
+        bool isEle(abs(pid)==11);
+        bool isMu(abs(pid)==13);
+
+        //save first two leptons found (fallback for DY->ll MC truth...)
+        if(id_firstLeptons.size()<2 && (isEle || isMu)) {
+          id_firstLeptons.push_back(pid);
+          p4_firstLeptons.push_back(p4);
+        }
+
         if(pid==6)  topP4=p4;
         if(pid==-6) antitopP4=p4;
         if( abs(pid)<6  && abs(mom_pid)==6 ) {          
           if(p4.Pt()>30 && fabs(p4.Eta())<2.5) genBjets.push_back(p4);          
         }
         
-        bool isFromTop(abs(mom_pid)==6 || abs(gmom_pid)==6 );
-        bool isFromZ( abs(mom_pid)==23 || abs(gmom_pid)==23 );
-        bool isFromW( abs(mom_pid)==24 || abs(gmom_pid)==24 );
-        bool isTauFeedDown( abs(mom_pid)==15 );
+        //clear Z->ll decays
+        if(abs(mom_pid)==23) {
+          if(isEle) { neFromZ++; genZLeptons.push_back(p4); }
+          if(isMu)  { nmFromZ++; genZLeptons.push_back(p4); }
+        }
+        //clear Z->tautau->X decays
+        else if(abs(gmom_pid)==23) {
+          if(isTauFeedDown && (isEle || isMu)) genZTauLeptons.push_back(p4);
+          if(abs(pid)==16) ntFromZ++;          
+        }
+        //unclear Z decays, fall back for taus
+        //this is guess work as in some cases (~5%) some information seems missing
+        //assumes if within the first particles in the the MC truth it is from the hard process
+        else if( isTauFeedDown && i<10) { 
+          if(abs(pid)==16) ntFromZ++;  
+          if(isEle || isMu) genZTauLeptons.push_back(p4);
+        }
         
+        //ttbar MC truth
         //count W leptonic decays
-        if( abs(pid)==11 || abs(pid)==13 )
+        if( isEle || isMu )
           {
             if(isFromTop && isFromW) nlFromTopW++;
           }
@@ -787,7 +829,7 @@ int main(int argc, char* argv[])
           }
 
         //charged leptons
-        if(abs(pid)==11 || abs(pid)==13) {
+        if(isEle || isMu) {
 
           //leptons from t->W->l or W->tau->l
           if(isFromW && (isTauFeedDown || isFromTop ) ) {
@@ -796,20 +838,56 @@ int main(int argc, char* argv[])
             genLeptonIds.push_back(pid);
             genDileptonCat *= abs(pid);
           }
-
-          //leptons from Z->ll or Z->tt->ll
-          if(isFromZ || isTauFeedDown){
-            genZLeptons.push_back(p4);
-          }
         }
 
         //neutrinos
-        if(abs(pid)==12 || abs(pid)==14 || abs(pid)==16){
-          if(isFromZ || isTauFeedDown) {
-            genZLeptons.push_back(p4);
+        //if(abs(pid)==12 || abs(pid)==14 || abs(pid)==16){
+        //  }
+      }
+
+      //process DY MC truth further
+      if(isDYMC){
+        
+        //generator level dilepton information
+        TLorentzVector ll(0,0,0,0);
+        if(genZLeptons.size()>1) {
+          ll=genZLeptons[0]+genZLeptons[1];
+        }
+
+        //Z decay
+        t_decayId=(neFromZ +8*nmFromZ + 16*ntFromZ);
+        
+        //another fall back, check if the first two leptons in list
+        //are compatible with a OS M>50
+        if(t_decayId==0 && p4_firstLeptons.size()>1) {
+          int llid=id_firstLeptons[0]*id_firstLeptons[1];
+          if(llid==-13*13 || llid==-11*11) {
+            ll=p4_firstLeptons[0]+p4_firstLeptons[1];
+            if(ll.M()>50) {
+              if(llid==-11*11) t_decayId=2;
+              if(llid==-13*13) t_decayId=2*8;              
+            }
           }
         }
+        
+        //count tau leptonic decays
+        t_tauDecayId=0;
+        if(ntFromZ>0) {
+          t_tauDecayId=genZTauLeptons.size();
+
+          //update dilepton information in case of tautau->ll+X
+          if(t_tauDecayId>1) {
+            ll=genZTauLeptons[0]+genZTauLeptons[1];
+          }
+        }
+
+        //save final dilepton information
+        t_genllpt=ll.Pt();
+        t_genlleta=ll.Eta();
+        t_genllphi=ll.Phi();
+        t_genllm=ll.M();
       }
+  
       t_weight_BRW=getMadgraphBRWlCorrection(nlFromTopW);
       ht.fill("br",2*nlFromTopW,1);
       ht.fill("br",2*nlFromTopW+1,t_weight_BRW);
@@ -964,12 +1042,26 @@ int main(int argc, char* argv[])
       l.origIdx = muIter;
       l.isMatched=false;
       l.isTauFeedDown=false;
-      for(size_t ig=0;ig<genLeptons.size(); ig++) {
-        if(genLeptons[ig].DeltaR(l.p4)<0.1) continue;
-        l.isMatched=true;
-        l.isTauFeedDown=genTauLeptons[ig];
+      if(isDYMC) {
+        for(size_t ig=0;ig<genZLeptons.size(); ig++) {
+          if(genZLeptons[ig].DeltaR(l.p4)<0.1) continue;
+          l.isMatched=true;
+          l.isTauFeedDown=false;
+        }
+        for(size_t ig=0;ig<genZTauLeptons.size(); ig++) {
+          if(genZTauLeptons[ig].DeltaR(l.p4)<0.1) continue;
+          l.isMatched=true;
+          l.isTauFeedDown=true;
+        }
       }
-    
+      else{
+        for(size_t ig=0;ig<genLeptons.size(); ig++) {
+          if(genLeptons[ig].DeltaR(l.p4)<0.1) continue;
+          l.isMatched=true;
+          l.isTauFeedDown=genTauLeptons[ig];
+        }
+      }
+
       noIdMu.push_back(l);
 
       //id (Tight muon requirements)
@@ -1072,10 +1164,24 @@ int main(int argc, char* argv[])
       l.origIdx=eleIter;
       l.isMatched=false;
       l.isTauFeedDown=false;
-      for(size_t ig=0;ig<genLeptons.size(); ig++) {
-        if(genLeptons[ig].DeltaR(l.p4)<0.1) continue;
-        l.isMatched=true;
-        l.isTauFeedDown=genTauLeptons[ig];
+      if(isDYMC) {
+        for(size_t ig=0;ig<genZLeptons.size(); ig++) {
+          if(genZLeptons[ig].DeltaR(l.p4)<0.1) continue;
+          l.isMatched=true;
+          l.isTauFeedDown=false;
+        }
+        for(size_t ig=0;ig<genZTauLeptons.size(); ig++) {
+          if(genZTauLeptons[ig].DeltaR(l.p4)<0.1) continue;
+          l.isMatched=true;
+          l.isTauFeedDown=true;
+        }
+      }
+      else{
+        for(size_t ig=0;ig<genLeptons.size(); ig++) {
+          if(genLeptons[ig].DeltaR(l.p4)<0.1) continue;
+          l.isMatched=true;
+          l.isTauFeedDown=genTauLeptons[ig];
+        }
       }
 
       noIdEle.push_back(l);
@@ -1132,10 +1238,12 @@ int main(int argc, char* argv[])
     //sort selected electrons by pt
     std::sort(selLeptons.begin(),selLeptons.end(),orderByPt);
 
-    //monitor trigger efficiency
-    if(selLeptons.size()>=2){
+    //monitor trigger/matching efficiency
+    t_matchedDecays=0;
+    if(selLeptons.size()>1){
       for(size_t ilep=0; ilep<2; ilep++){
         if(!selLeptons[ilep].isMatched) continue;
+        t_matchedDecays += 1;
         TString cat( abs(selLeptons[ilep].id)==11 ? "e" : "m");
         float pt(selLeptons[ilep].p4.Pt()), abseta(fabs(selLeptons[ilep].p4.Eta()));
         ht.fill("trig_pt",  pt,     ncoll, cat);          
@@ -1148,9 +1256,10 @@ int main(int argc, char* argv[])
     }
 
     //require at least two leptons matched to trigger objects
-    if(selLeptons.size()<2) continue;
-    bool hasOneTrigMatchLepton(selLeptons[0].isTrigMatch || selLeptons[1].isTrigMatch);
-    if( !hasOneTrigMatchLepton ) continue;
+    if(selLeptons.size()<2 && !isDYMC) continue;
+    bool hasOneTrigMatchLepton(false);
+    if(selLeptons.size()>1) hasOneTrigMatchLepton=(selLeptons[0].isTrigMatch || selLeptons[1].isTrigMatch);
+    if( !hasOneTrigMatchLepton && !isDYMC) continue;
     
     //apply trigger preselection & duplicate event removal
     //in skim mode assume that the hltobject matched to offline will give the HLT trigger bit
@@ -1163,7 +1272,7 @@ int main(int argc, char* argv[])
     }
 
     int trig=etrig+mtrig;
-    if(trig==0) continue;
+    if(trig==0 && !isDYMC) continue;
 
     if(isSingleMuPD || isMuSkimedMCPD) {
       if(std::find(badMuonTriggerRuns.begin(), badMuonTriggerRuns.end(), fForestTree.run) != badMuonTriggerRuns.end() and !isMuSkimedMCPD) continue;
@@ -1179,19 +1288,27 @@ int main(int argc, char* argv[])
     }
 
     //dilepton selection
-    TLorentzVector ll(selLeptons[0].p4+selLeptons[1].p4);
-    TLorentzVector ll_raw(selLeptons[0].p4*(selLeptons[0].rawpt/selLeptons[0].p4.Pt())+selLeptons[1].p4*(selLeptons[1].rawpt/selLeptons[1].p4.Pt()));
+    TLorentzVector ll(0,0,0,0);
+    TLorentzVector ll_raw(0,0,0,0);
+    int dilCode(0);
+    if(selLeptons.size()>1) {
+      ll=(selLeptons[0].p4+selLeptons[1].p4);
+      ll_raw=(selLeptons[0].p4*(selLeptons[0].rawpt/selLeptons[0].p4.Pt())+selLeptons[1].p4*(selLeptons[1].rawpt/selLeptons[1].p4.Pt()));
+      t_dphi=TMath::Abs(selLeptons[0].p4.DeltaPhi(selLeptons[1].p4));
+      t_deta=fabs(selLeptons[0].p4.Eta()-selLeptons[1].p4.Eta());
+      t_sumeta=selLeptons[0].p4.Eta()+selLeptons[1].p4.Eta();
+      dilCode=(selLeptons[0].id*selLeptons[1].id);
+    }
     t_llpt=ll.Pt();
     t_llpt_raw=ll_raw.Pt();
     t_lleta=ll.Eta();
     t_llphi=ll.Phi();
     t_llm=ll.M();
     t_llm_raw=ll_raw.M();
-    t_dphi=TMath::Abs(selLeptons[0].p4.DeltaPhi(selLeptons[1].p4));
-    t_deta=fabs(selLeptons[0].p4.Eta()-selLeptons[1].p4.Eta());
-    t_sumeta=selLeptons[0].p4.Eta()+selLeptons[1].p4.Eta();
-    int dilCode(selLeptons[0].id*selLeptons[1].id);
-    TString dilCat("mm");
+
+
+    TString dilCat("");
+    if(dilCode==13*13) dilCat="mm";
     if(dilCode==11*13) dilCat="em";
     if(dilCode==11*11) dilCat="ee";
 
@@ -1269,7 +1386,12 @@ int main(int argc, char* argv[])
       }
 
       //cross clean wrt to leptons
-      if(jp4.DeltaR(selLeptons[0].p4)<0.4 || jp4.DeltaR(selLeptons[1].p4)<0.4) continue;
+      if(selLeptons.size()>0) {
+        if(jp4.DeltaR(selLeptons[0].p4)<0.4) continue;
+        if(selLeptons.size()>1) {
+          if(jp4.DeltaR(selLeptons[1].p4)<0.4) continue;
+        }
+      }
       
       pfJetsIdx.push_back(std::make_tuple(pfJetsP4.size(),nsvtxTk,msvtx,csvVal,matchjp4,refFlavor,refFlavorForB));
       pfJetsP4.push_back(jp4);
@@ -1415,8 +1537,8 @@ int main(int argc, char* argv[])
 
         
     //fill histograms
-    for(int i=0; i<2; i++) {
-      TString pf(Form("l%d",i+1));
+    for(size_t i=0; i<TMath::Min(selLeptons.size(),(size_t)2); i++) {
+      TString pf(Form("l%d",(int)i+1));
       float pt(selLeptons[i].p4.Pt());
       ht.fill(pf+"pt",             pt,                            plotWgt, categs);
       ht.fill(pf+"eta",            fabs(selLeptons[i].p4.Eta()),  plotWgt, categs);
@@ -1428,17 +1550,19 @@ int main(int argc, char* argv[])
 
     ht.fill( "acopl",     1-fabs(t_dphi)/TMath::Pi(),                   plotWgt, categs);
     ht.fill( "detall",    t_deta,                                       plotWgt, categs);
-    ht.fill( "drll",      selLeptons[0].p4.DeltaR(selLeptons[1].p4),    plotWgt, categs);
     ht.fill( "mll",       t_llm,                                        plotWgt, categs);
     ht.fill( "ptll",      t_llpt,                                       plotWgt, categs);
-    ht.fill( "ptsum",     selLeptons[0].p4.Pt()+selLeptons[1].p4.Pt(),  plotWgt, categs);
+    if(selLeptons.size()>1){
+      ht.fill( "drll",      selLeptons[0].p4.DeltaR(selLeptons[1].p4),    plotWgt, categs);
+      ht.fill( "ptsum",     selLeptons[0].p4.Pt()+selLeptons[1].p4.Pt(),  plotWgt, categs);
+    }
 
     //PF jets
     ht.fill( "npfjets",   npfjets,   plotWgt, categs);
     ht.fill( "npfbjets",  npfbjets,  plotWgt, categs);
     std::vector<TLorentzVector> pfFinalState;
-    pfFinalState.push_back(selLeptons[0].p4);
-    pfFinalState.push_back(selLeptons[1].p4);
+    if(selLeptons.size()>0) pfFinalState.push_back(selLeptons[0].p4);
+    if(selLeptons.size()>1) pfFinalState.push_back(selLeptons[1].p4);
     for(size_t ij=0; ij<min(pfJetsIdx.size(),size_t(2)); ij++) {     
       int idx(std::get<0>(pfJetsIdx[ij]));
       int ntks(std::get<1>(pfJetsIdx[ij]));
@@ -1455,7 +1579,6 @@ int main(int argc, char* argv[])
       ht.fill( "pf"+ppf+"jcsv",     csv,             plotWgt, categs);
       ht.fill2D( "pf"+ppf+"jetavsphi",   p4.Eta(),p4.Phi(),   plotWgt, categs);
 
-
       quenchingModel->SetParameter(0, 50.); // this sets the omega_c parameter. if we want to make this centrality dependent
       float tmp_quench_loss = quenchingModel->GetRandom();
       tmp_quench_loss = TMath::Abs(TMath::Sin(p4.Theta())*tmp_quench_loss); // make it only on the transverse part...
@@ -1464,9 +1587,6 @@ int main(int argc, char* argv[])
       float quenchedPt=p4.Pt()-tmp_quench_loss*centralitySuppression;
       ht.fill2D("jptvsjptquench", p4.Pt(), quenchedPt, plotWgt,categs);
     }
-
-
-
     
     std::vector<float> rapMoments=getRapidityMoments(pfFinalState);
     ht.fill( "pfrapavg",     rapMoments[0], plotWgt, categs);
@@ -1517,7 +1637,7 @@ int main(int argc, char* argv[])
 
     //get expected trigger efficiencies and measured scale factors
     std::vector<std::pair<float,float>  > ltrigEff, ltrigSF;
-    for(size_t ilep=0; ilep<2; ilep++){
+    for(size_t ilep=0; ilep<TMath::Min((size_t)2,selLeptons.size()); ilep++){
       float pt(selLeptons[ilep].p4.Pt()),eta(selLeptons[ilep].p4.Eta()),abseta(fabs(eta));
 
       if(abs(selLeptons[ilep].id)==11){
@@ -1535,13 +1655,17 @@ int main(int argc, char* argv[])
     }
 
     //trigeff = e1*e2 +e1*(1-e2)+e2*(1-e1), the rest is scale factor and error propagation
-    t_trigSF  = (ltrigSF[0].first*ltrigEff[0].first+ltrigSF[1].first*ltrigEff[1].first-ltrigSF[0].first*ltrigSF[1].first*ltrigEff[0].first*ltrigEff[1].first);
-    t_trigSF /= (           
+    t_trigSF=0;
+    t_trigSFUnc=0;
+    if(selLeptons.size()>1){
+      t_trigSF  = (ltrigSF[0].first*ltrigEff[0].first+ltrigSF[1].first*ltrigEff[1].first-ltrigSF[0].first*ltrigSF[1].first*ltrigEff[0].first*ltrigEff[1].first);
+      t_trigSF /= (           
       ltrigEff[0].first+                 ltrigEff[1].first-                                  ltrigEff[0].first*ltrigEff[1].first);
 
-    t_trigSFUnc  = pow( ltrigSF[0].second*(ltrigEff[0].first-ltrigSF[1].first*ltrigEff[0].first*ltrigEff[1].first), 2 );
-    t_trigSFUnc += pow( ltrigSF[1].second*(ltrigEff[1].first-ltrigSF[0].first*ltrigEff[0].first*ltrigEff[1].first), 2 );
-    t_trigSFUnc  = sqrt(t_trigSFUnc);
+      t_trigSFUnc  = pow( ltrigSF[0].second*(ltrigEff[0].first-ltrigSF[1].first*ltrigEff[0].first*ltrigEff[1].first), 2 );
+      t_trigSFUnc += pow( ltrigSF[1].second*(ltrigEff[1].first-ltrigSF[0].first*ltrigEff[0].first*ltrigEff[1].first), 2 );
+      t_trigSFUnc  = sqrt(t_trigSFUnc);
+    }
 
     // fill the leptons ordered by pt
     t_lep_pt    .clear();
@@ -1688,17 +1812,20 @@ int main(int argc, char* argv[])
     t_mht = vis.Pt();
     
     // now set the 4 variables that we added for the tmva reader for the bdt evaluation
-    bdt_l1pt      = t_lep_calpt[0];
-    bdt_apt       = (t_lep_calpt[0]-t_lep_calpt[1])/(t_lep_calpt[0]+t_lep_calpt[1]);
-    bdt_abslleta  = fabs(t_lleta);
-    bdt_dphilll2  = fabs(dphi_2(t_lep_calpt[0],t_lep_eta[0],t_lep_phi[0],t_lep_calpt[1],t_lep_eta[1],t_lep_phi[1],2)); // this function is in functions.cc in scripts/
-    bdt_sumabseta = fabs(t_lep_eta[0])+fabs(t_lep_eta[1]);
-    //bdt_flavor    = abs(t_lep_pdgId[0]*t_lep_pdgId[1]); //abs should be fine here, it's an int
-    t_apt         = bdt_apt;
-    t_dphilll2    = bdt_dphilll2;
-    t_bdt         = reader->EvaluateMVA( methodName );
-    t_bdt_rarity  = reader->GetRarity  ( methodName );
-    t_fisher2     = readerFisher2->EvaluateMVA( methodNameFisher2 );
+    if(selLeptons.size()>1) {
+      bdt_l1pt      = t_lep_calpt[0];
+      bdt_apt       = (t_lep_calpt[0]-t_lep_calpt[1])/(t_lep_calpt[0]+t_lep_calpt[1]);
+      bdt_abslleta  = fabs(t_lleta);
+      bdt_dphilll2  = fabs(dphi_2(t_lep_calpt[0],t_lep_eta[0],t_lep_phi[0],t_lep_calpt[1],t_lep_eta[1],t_lep_phi[1],2)); // this function is in functions.cc in scripts/
+      bdt_sumabseta = fabs(t_lep_eta[0])+fabs(t_lep_eta[1]);
+      //bdt_flavor    = abs(t_lep_pdgId[0]*t_lep_pdgId[1]); //abs should be fine here, it's an int
+      t_apt         = bdt_apt;
+      t_dphilll2    = bdt_dphilll2;
+      t_bdt         = reader->EvaluateMVA( methodName );
+      t_bdt_rarity  = reader->GetRarity  ( methodName );
+      t_fisher2     = readerFisher2->EvaluateMVA( methodNameFisher2 );
+    }
+
     t_bjet_leadPassTight = (t_bjet_csvv2.size()>0 && t_bjet_csvv2[0]>csvWPList[1]);
     t_isData = !isMC;
     
